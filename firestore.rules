@@ -1,0 +1,48 @@
+rules_version = '2';
+// AdminHub — правила доступу Firestore.
+// Логіка: увійти може будь-хто з акаунтом у Firebase Auth, але БАЧИТИ дані може лише той,
+// чий email є в колекції `members` (id документа = email у нижньому регістрі).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null && request.auth.token.email is string; }
+    function email() { return request.auth.token.email.lower(); }
+    function memberPath() { return /databases/$(database)/documents/members/$(email()); }
+    function isMember() { return signedIn() && exists(memberPath()); }
+    function role() { return get(memberPath()).data.role; }
+    function canEdit() { return isMember() && role() in ['editor', 'admin']; }
+    function isAdmin() { return isMember() && role() == 'admin'; }
+
+    function validSite() {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['name', 'url', 'adminUrl', 'color', 'note', 'order', 'sections', 'updatedAt', 'updatedBy'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 100
+        && d.sections is list && d.sections.size() <= 200
+        && d.updatedBy == email();
+    }
+
+    // Сайти з розділами та посиланнями (один документ = один сайт)
+    match /sites/{siteId} {
+      allow read: if isMember();
+      allow create, update: if canEdit() && siteId.size() <= 80 && validSite();
+      allow delete: if isAdmin();
+    }
+
+    // Список доступу. Користувач може прочитати лише СВІЙ запис (щоб дізнатися роль).
+    match /members/{memberEmail} {
+      allow get: if signedIn() && memberEmail == email();
+      allow list: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasOnly(['role', 'name'])
+        && request.resource.data.role in ['viewer', 'editor', 'admin']
+        && memberEmail == memberEmail.lower()
+        && memberEmail != email();   // свою роль змінити не можна (захист від випадкового самоблокування)
+      allow delete: if isAdmin() && memberEmail != email();
+    }
+
+    // Усе інше — заборонено
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
